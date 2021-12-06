@@ -4,5 +4,5 @@
     android:accessibilityFlags="flagDefault"
     android:notificationTimeout="50"
 	android:description="@string/input_a11y_service_description"
-	android:canPerformGestures="true"
     />
+<!--	android:canPerformGestures="true"-->
