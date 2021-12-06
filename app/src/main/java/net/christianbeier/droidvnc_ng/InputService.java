@@ -14,37 +14,39 @@ package net.christianbeier.droidvnc_ng;
  *
  */
 
+import android.accessibilityservice.AccessibilityButtonController;
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.graphics.PathMeasure;
+import android.os.Build;
+import android.os.Environment;
 import android.os.Handler;
+import android.os.IInterface;
 import android.util.DisplayMetrics;
 import android.util.Log;
+import android.view.InputEvent;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.ViewConfiguration;
 import android.graphics.Path;
+import android.view.accessibility.AccessibilityNodeProvider;
+
+import androidx.annotation.RequiresApi;
+
+import java.io.IOException;
+import java.io.InputStream;
 
 public class InputService extends AccessibilityService {
 
 	/**
 	 * This globally tracks gesture completion status and is _not_ per gesture.
 	 */
-	private static class GestureCallback extends AccessibilityService.GestureResultCallback {
-		private boolean mCompleted = true; // initially true so we can actually dispatch something
 
-		@Override
-		public synchronized void onCompleted(GestureDescription gestureDescription) {
-			mCompleted = true;
-		}
-
-		@Override
-		public synchronized void onCancelled(GestureDescription gestureDescription) {
-			mCompleted = true;
-		}
-	}
 
 	private static final String TAG = "InputService";
 
@@ -62,8 +64,7 @@ public class InputService extends AccessibilityService {
 
 	private float mScaling;
 
-	private GestureCallback mGestureCallback = new GestureCallback();
-
+	private final CommandController commandController = new CommandController();
 
 	@Override
 	public void onAccessibilityEvent( AccessibilityEvent event ) { }
@@ -106,12 +107,12 @@ public class InputService extends AccessibilityService {
 		}
 	}
 
-
 	public static void onPointerEvent(int buttonMask, int x, int y, long client) {
 
 		try {
 			x /= instance.mScaling;
 			y /= instance.mScaling;
+
 
 			/*
 			    left mouse button
@@ -131,6 +132,7 @@ public class InputService extends AccessibilityService {
 			// up, was down
 			if ((buttonMask & (1 << 0)) == 0 && instance.mIsButtonOneDown) {
 				instance.mIsButtonOneDown = false;
+
 				instance.endGesture(x, y);
 			}
 
@@ -142,7 +144,6 @@ public class InputService extends AccessibilityService {
 
 			// scroll up
 			if ((buttonMask & (1 << 3)) != 0) {
-
 				DisplayMetrics displayMetrics = new DisplayMetrics();
 				WindowManager wm = (WindowManager) instance.getApplicationContext().getSystemService(Context.WINDOW_SERVICE);
 				wm.getDefaultDisplay().getRealMetrics(displayMetrics);
@@ -152,7 +153,6 @@ public class InputService extends AccessibilityService {
 
 			// scroll down
 			if ((buttonMask & (1 << 4)) != 0) {
-
 				DisplayMetrics displayMetrics = new DisplayMetrics();
 				WindowManager wm = (WindowManager) instance.getApplicationContext().getSystemService(Context.WINDOW_SERVICE);
 				wm.getDefaultDisplay().getRealMetrics(displayMetrics);
@@ -167,7 +167,6 @@ public class InputService extends AccessibilityService {
 
 	public static void onKeyEvent(int down, long keysym, long client) {
 		Log.d(TAG, "onKeyEvent: keysym " + keysym + " down " + down + " by client " + client);
-
 		/*
 			Special key handling.
 		 */
@@ -243,6 +242,7 @@ public class InputService extends AccessibilityService {
 			// instance probably null
 			Log.e(TAG, "onCutText: failed: " + e.toString());
 		}
+
 	}
 
 	private void startGesture(int x, int y) {
@@ -257,19 +257,55 @@ public class InputService extends AccessibilityService {
 
 	private void endGesture(int x, int y) {
 		mPath.lineTo( x, y );
-		GestureDescription.StrokeDescription stroke = new GestureDescription.StrokeDescription( mPath, 0, System.currentTimeMillis() - mLastGestureStartTime);
-		GestureDescription.Builder builder = new GestureDescription.Builder();
-		builder.addStroke(stroke);
-		dispatchGesture(builder.build(), null, null);
+
+		switch (computeGesture(mPath)) {
+			case Constants.GESTURE_TYPE_TAP:
+				commandController.executeCommand("input tap " + x + " " + y);
+
+				break;
+			case Constants.GESTURE_TYPE_SWIPE:
+				float[] startPointer = new float[2];
+
+				float[] endPointer = new float[2];
+
+				getPoint(mPath, 0.0f, startPointer);
+
+				getPoint(mPath, new PathMeasure(mPath, false).getLength(), endPointer);
+
+				commandController.executeCommand(
+						"input swipe " +
+								startPointer[0] + " " + startPointer[1] + " " +
+								endPointer[0] + " " + endPointer[1] + " " + "100"
+				);
+				break;
+		}
+
 	}
 
+	private int computeGesture(Path path) {
+		PathMeasure pathMeasure = new PathMeasure(path, false);
 
-	private  void longPress( int x, int y )
+		if(pathMeasure.getLength() > 2.0f) {
+			return Constants.GESTURE_TYPE_SWIPE;
+		}
+		else {
+			return Constants.GESTURE_TYPE_TAP;
+		}
+
+	}
+
+	private void getPoint(Path path, float distance, float[] array) {
+		PathMeasure pathMeasure = new PathMeasure(path, false);
+
+		boolean result = pathMeasure.getPosTan(distance, array, null);
+	}
+
+	private  void longPress(int x, int y )
 	{
-			dispatchGesture( createClick( x, y, ViewConfiguration.getTapTimeout() + ViewConfiguration.getLongPressTimeout()), null, null );
+		commandController.executeCommand("input swipe " + x + " " + y + " " + x + " " + y + " 2000");
 	}
-
-	private void scroll( int x, int y, int scrollAmount )
+//
+	private void scroll(int x, int y, int scrollAmount )
 	{
 			/*
 			   Ignore if another gesture is still ongoing. Especially true for scroll events:
@@ -277,37 +313,61 @@ public class InputService extends AccessibilityService {
 			   event would cancel the preceding one, only actually scrolling when the user stopped
 			   scrolling.
 			 */
-			if(!mGestureCallback.mCompleted)
-				return;
-
-			mGestureCallback.mCompleted = false;
-			dispatchGesture(createSwipe(x, y, x, y - scrollAmount, ViewConfiguration.getScrollDefaultDelay()), mGestureCallback, null);
+		if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+//			if(!mGestureCallback.mCompleted)
+//				return;
+//
+//			mGestureCallback.mCompleted = false;
+//			dispatchGesture(createSwipe(x, y, x, y - scrollAmount, ViewConfiguration.getScrollDefaultDelay()), mGestureCallback, null);
+		}
+		else {
+//			executeCommand("input swipe " + x + " " + y + " " + x + " " + (y - scrollAmount));
+		}
 	}
 
-	private static GestureDescription createClick( int x, int y, int duration )
-	{
-		Path clickPath = new Path();
-		clickPath.moveTo( x, y );
-		GestureDescription.StrokeDescription clickStroke = new GestureDescription.StrokeDescription( clickPath, 0, duration );
-		GestureDescription.Builder clickBuilder = new GestureDescription.Builder();
-		clickBuilder.addStroke( clickStroke );
-		return clickBuilder.build();
-	}
+	private static class CommandController {
+		private boolean isCompleted = true;
 
-	private static GestureDescription createSwipe( int x1, int y1, int x2, int y2, int duration )
-	{
-		Path swipePath = new Path();
+		private int executeCommand(String cmd) {
+			if(!isCompleted) {
+				return -1;
+			}
 
-		x1 = Math.max(x1, 0);
-		y1 = Math.max(y1, 0);
-		x2 = Math.max(x2, 0);
-		y2 = Math.max(y2, 0);
+			isCompleted = false;
 
-		swipePath.moveTo( x1, y1 );
-		swipePath.lineTo( x2, y2 );
-		GestureDescription.StrokeDescription swipeStroke = new GestureDescription.StrokeDescription( swipePath, 0, duration );
-		GestureDescription.Builder swipeBuilder = new GestureDescription.Builder();
-		swipeBuilder.addStroke( swipeStroke );
-		return swipeBuilder.build();
+			try {
+				Process process = Runtime.getRuntime().exec(new String[] {"su", "-c", cmd});
+
+				InputStream inputStream = process.getInputStream();
+
+				int waitValue = process.waitFor();
+
+				if (inputStream.available() > 0) {
+					byte[] result = new byte[inputStream.available()];
+
+					inputStream.read(result);
+
+					Log.d("Allen", "Result = " + new String(result));
+				}
+
+				Log.d("Allen", "with value = " + waitValue);
+
+				Log.d("Allen", "exit value = " + process.exitValue());
+
+				isCompleted = true;
+
+				return process.exitValue();
+
+			} catch (IOException | InterruptedException e) {
+				e.printStackTrace();
+
+				isCompleted = true;
+				return -1;
+			}
+		}
+
+		public boolean isCompleted() {
+			return isCompleted;
+		}
 	}
 }

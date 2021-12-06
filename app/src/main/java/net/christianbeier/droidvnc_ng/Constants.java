@@ -31,4 +31,6 @@ public class Constants {
     public static final String PREFS_KEY_SETTINGS_START_ON_BOOT = "settings_start_on_boot" ;
     public static final String PREFS_KEY_SETTINGS_SCALING = "settings_scaling" ;
 
+    public static final int GESTURE_TYPE_TAP = 0 ;
+    public static final int GESTURE_TYPE_SWIPE = 1 ;
 }
